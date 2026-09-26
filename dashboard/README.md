@@ -2,7 +2,8 @@
 
 A live transaction monitor for the trained Random Forest model (threshold 0.15).
 Upload a CSV of unlabeled transactions, the API scores every row, and the UI streams
-verdicts into the feed with running stats.
+verdicts into the feed with running stats. Click any row to see why the model
+reached that verdict (per-transaction SHAP feature contributions).
 
 ```
 dashboard/
@@ -33,12 +34,19 @@ Optional environment variables:
 | `FRAUDFLUX_SCALER_PATH` | `./data/processed/scaler.pkl` |
 | `FRAUDFLUX_THRESHOLD` | `0.15` |
 | `FRAUDFLUX_CORS_ORIGINS` | `http://localhost:5173` |
+| `FRAUDFLUX_MAX_ROWS` | `200000` |
+| `FRAUDFLUX_MAX_CACHED_JOBS` | `5` (scored uploads kept in memory for explanations) |
 
 Endpoints:
 
-- `GET /api/health` -> model and scaler load status
+- `GET /api/health` -> model, scaler, and explainer load status
 - `GET /api/model` -> model name, threshold, expected columns, reported test metrics
-- `POST /api/predict` (multipart `file`, optional `threshold` form field) -> per-row probability and verdict plus summary
+- `POST /api/predict` (multipart `file`, optional `threshold` form field) -> `job_id`, per-row probability and verdict, summary
+- `GET /api/explain/{job_id}/{index}` -> SHAP contributions for one scored row: baseline probability, signed contribution and raw value per feature, plain-language summary
+
+Explanations use `shap.TreeExplainer` on the loaded Random Forest. If `shap` is not
+installed the API still scores; the explain endpoint returns 503 and the UI shows
+an error with a retry button.
 
 ## Run the frontend
 

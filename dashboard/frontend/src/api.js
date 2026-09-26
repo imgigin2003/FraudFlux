@@ -10,6 +10,19 @@ export async function fetchHealth() {
   return res.json()
 }
 
+function detailToMessage(body, status) {
+  const d = body?.detail
+  if (typeof d === 'string') return d
+  if (d && d.message) {
+    const parts = [d.message]
+    if (d.missing?.length) parts.push(`Missing: ${d.missing.join(', ')}`)
+    if (d.unexpected?.length) parts.push(`Unexpected: ${d.unexpected.join(', ')}`)
+    if (d.columns?.length) parts.push(`Columns: ${d.columns.join(', ')}`)
+    return parts.join(' ')
+  }
+  return `Request failed (${status})`
+}
+
 export async function scoreCsv(file, threshold) {
   const form = new FormData()
   form.append('file', file)
@@ -17,17 +30,13 @@ export async function scoreCsv(file, threshold) {
 
   const res = await fetch('/api/predict', { method: 'POST', body: form })
   const body = await res.json().catch(() => ({}))
-  if (!res.ok) {
-    const d = body.detail
-    if (typeof d === 'string') throw new Error(d)
-    if (d && d.message) {
-      const parts = [d.message]
-      if (d.missing?.length) parts.push(`Missing: ${d.missing.join(', ')}`)
-      if (d.unexpected?.length) parts.push(`Unexpected: ${d.unexpected.join(', ')}`)
-      if (d.columns?.length) parts.push(`Columns: ${d.columns.join(', ')}`)
-      throw new Error(parts.join(' '))
-    }
-    throw new Error(`Request failed (${res.status})`)
-  }
+  if (!res.ok) throw new Error(detailToMessage(body, res.status))
+  return body
+}
+
+export async function explainRow(jobId, index) {
+  const res = await fetch(`/api/explain/${jobId}/${index}`)
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(detailToMessage(body, res.status))
   return body
 }

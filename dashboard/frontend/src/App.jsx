@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import UploadZone from './components/UploadZone.jsx'
 import Feed from './components/Feed.jsx'
 import Stats from './components/Stats.jsx'
-import { fetchHealth, fetchModelInfo, scoreCsv } from './api.js'
+import ExplanationPanel from './components/ExplanationPanel.jsx'
+import { explainRow, fetchHealth, fetchModelInfo, scoreCsv } from './api.js'
 
 const STREAM_INTERVAL_MS = 120
 
@@ -17,6 +18,12 @@ export default function App() {
   const [error, setError] = useState(null)
   const [theme, setTheme] = useState(() => localStorage.getItem('ff-theme') || 'dark')
   const timerRef = useRef(null)
+
+  // Explanation state
+  const [selected, setSelected] = useState(null) // row object
+  const [explanation, setExplanation] = useState(null)
+  const [explainLoading, setExplainLoading] = useState(false)
+  const [explainError, setExplainError] = useState(null)
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -53,9 +60,17 @@ export default function App() {
     return () => clearInterval(timerRef.current)
   }, [result])
 
+  function closeExplanation() {
+    setSelected(null)
+    setExplanation(null)
+    setExplainError(null)
+    setExplainLoading(false)
+  }
+
   async function handleFile(file) {
     setError(null)
     setLoading(true)
+    closeExplanation()
     try {
       const res = await scoreCsv(file, threshold)
       setResult(res)
@@ -64,6 +79,30 @@ export default function App() {
     } finally {
       setLoading(false)
     }
+  }
+
+  async function loadExplanation(row) {
+    if (!result) return
+    setExplainLoading(true)
+    setExplainError(null)
+    setExplanation(null)
+    try {
+      const ex = await explainRow(result.job_id, row.index)
+      setExplanation(ex)
+    } catch (e) {
+      setExplainError(e.message)
+    } finally {
+      setExplainLoading(false)
+    }
+  }
+
+  function handleSelect(row) {
+    if (selected && selected.index === row.index) {
+      closeExplanation()
+      return
+    }
+    setSelected(row)
+    loadExplanation(row)
   }
 
   function skipStream() {
@@ -128,19 +167,35 @@ export default function App() {
 
       <Stats model={model} result={result} />
 
-      <Feed
-        rows={visible}
-        total={result?.rows.length || 0}
-        streaming={streaming}
-        onSkip={skipStream}
-        onDownload={downloadResults}
-        hasResult={!!result}
-      />
+      <div className={`fx-main ${selected ? 'with-panel' : ''}`}>
+        <Feed
+          rows={visible}
+          total={result?.rows.length || 0}
+          streaming={streaming}
+          onSkip={skipStream}
+          onDownload={downloadResults}
+          hasResult={!!result}
+          selectedIndex={selected?.index ?? null}
+          onSelect={handleSelect}
+        />
+        {selected && (
+          <ExplanationPanel
+            row={selected}
+            threshold={result?.threshold}
+            explanation={explanation}
+            loading={explainLoading}
+            error={explainError}
+            onRetry={() => loadExplanation(selected)}
+            onClose={closeExplanation}
+          />
+        )}
+      </div>
 
       {model && (
         <footer className="fx-foot">
           Held-out test split ({model.test_transactions.toLocaleString()} transactions): recall {(model.recall * 100).toFixed(2)}%,
           precision {(model.precision * 100).toFixed(2)}%, F1 {(model.f1 * 100).toFixed(2)}%. Confusion matrix TN {model.confusion_matrix.tn.toLocaleString()} / FP {model.confusion_matrix.fp} / FN {model.confusion_matrix.fn} / TP {model.confusion_matrix.tp}.
+          {model.explanations_available === false && ' Explanations are disabled: install shap on the API.'}
         </footer>
       )}
     </div>

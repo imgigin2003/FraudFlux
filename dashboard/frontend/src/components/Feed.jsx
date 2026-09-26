@@ -1,14 +1,15 @@
 function money(x) {
-  return `€ ${x.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  return `\u20ac ${x.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
-export default function Feed({ rows, total, streaming, onSkip, onDownload, hasResult }) {
+export default function Feed({ rows, total, streaming, onSkip, onDownload, hasResult, selectedIndex, onSelect }) {
   return (
     <section className="fx-feed">
       <div className="fx-feed-bar">
         <span className="k">
           {hasResult ? `${Math.min(rows.length, total).toLocaleString()} / ${total.toLocaleString()} shown` : 'No transactions scored yet'}
           {rows.length >= 200 && total > 200 ? ' (feed keeps the latest 200; download for all)' : ''}
+          {hasResult && rows.length > 0 ? ' \u00b7 click a row to see why' : ''}
         </span>
         <span className="fx-feed-actions">
           {streaming && (
@@ -37,7 +38,21 @@ export default function Feed({ rows, total, streaming, onSkip, onDownload, hasRe
           <div className="fx-empty">Upload a CSV to start the scoring stream.</div>
         )}
         {rows.map((r) => (
-          <div key={r.index} className={`fx-row ${r.is_fraud ? 'hot' : ''}`}>
+          <div
+            key={r.index}
+            className={`fx-row clickable ${r.is_fraud ? 'hot' : ''} ${selectedIndex === r.index ? 'selected' : ''}`}
+            onClick={() => onSelect(r)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onSelect(r)
+              }
+            }}
+            role="button"
+            tabIndex={0}
+            aria-pressed={selectedIndex === r.index}
+            title="Click to see why"
+          >
             <span className="c-id">#{r.index.toLocaleString()}</span>
             <span className="c-time">{r.time.toLocaleString()}</span>
             <span className="c-amt">{money(r.amount)}</span>
