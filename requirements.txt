@@ -1,3 +1,7 @@
 # Runtime dependencies for the Vercel API function (api/index.py).
+# Keep in sync with dashboard/backend/requirements.txt (Vercel cannot follow -r).
 # Training dependencies live in src/requirements.txt.
--r dashboard/backend/requirements.txt
+fastapi>=0.110
+python-multipart>=0.0.9
+pandas>=2.0
+numpy>=1.24
