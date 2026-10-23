@@ -1,0 +1,18 @@
+{
+  "framework": null,
+  "installCommand": "cd dashboard/frontend && npm ci",
+  "buildCommand": "cd dashboard/frontend && npm run build",
+  "outputDirectory": "dashboard/frontend/dist",
+  "functions": {
+    "api/index.py": {
+      "includeFiles": "{dashboard/__init__.py,dashboard/backend/**/*.py,models/random_forest_trees.npz}",
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index"
+    }
+  ]
+}

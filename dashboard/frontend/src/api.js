@@ -23,20 +23,87 @@ function detailToMessage(body, status) {
   return `Request failed (${status})`
 }
 
-export async function scoreCsv(file, threshold) {
-  const form = new FormData()
-  form.append('file', file)
-  if (threshold !== undefined && threshold !== null) form.append('threshold', String(threshold))
+// Serverless functions cap request bodies (4.5 MB on Vercel), so large CSVs are
+// scored in chunks of rows and merged here.
+const CHUNK_BYTES = 3_000_000
 
-  const res = await fetch('/api/predict', { method: 'POST', body: form })
+async function postForm(url, fields) {
+  const form = new FormData()
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined && v !== null) form.append(k, v instanceof Blob ? v : String(v))
+  }
+  const res = await fetch(url, { method: 'POST', body: form })
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(detailToMessage(body, res.status))
   return body
 }
 
-export async function explainRow(jobId, index) {
-  const res = await fetch(`/api/explain/${jobId}/${index}`)
-  const body = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(detailToMessage(body, res.status))
-  return body
+function csvBlob(header, lines) {
+  return new Blob([[header, ...lines].join('\n')], { type: 'text/csv' })
+}
+
+// Split into header + data lines, skipping blank lines like pandas does, so
+// line i is the row the API reports as index i.
+async function readCsv(file) {
+  const all = (await file.text()).split(/\r?\n/).filter((l) => l.trim() !== '')
+  return { header: all[0] ?? '', lines: all.slice(1) }
+}
+
+export async function scoreCsv(file, threshold) {
+  const source = await readCsv(file)
+  const { header, lines } = source
+
+  const chunks = []
+  let start = 0
+  while (start < lines.length || chunks.length === 0) {
+    let end = start
+    let bytes = header.length
+    while (end < lines.length && (end === start || bytes + lines[end].length < CHUNK_BYTES)) {
+      bytes += lines[end].length + 1
+      end += 1
+    }
+    chunks.push([start, end])
+    start = end
+  }
+
+  const rows = []
+  let total = 0, fraud = 0, flagged = 0, probSum = 0, maxProb = 0, result = null
+  for (const [from, to] of chunks) {
+    const part = await postForm('/api/predict', {
+      file: new File([csvBlob(header, lines.slice(from, to))], file.name, { type: 'text/csv' }),
+      threshold,
+    })
+    for (const r of part.rows) rows.push({ ...r, index: r.index + from })
+    const s = part.summary
+    total += s.total
+    fraud += s.fraud
+    flagged += s.flagged_amount
+    probSum += s.mean_probability * s.total
+    maxProb = Math.max(maxProb, s.max_probability)
+    result = part
+  }
+
+  return {
+    ...result,
+    filename: file.name,
+    source,
+    summary: {
+      total,
+      fraud,
+      not_fraud: total - fraud,
+      fraud_rate: +(fraud / total).toFixed(6),
+      flagged_amount: +flagged.toFixed(2),
+      mean_probability: +(probSum / total).toFixed(6),
+      max_probability: maxProb,
+    },
+    rows,
+  }
+}
+
+export async function explainRow(source, index, threshold) {
+  return postForm('/api/explain', {
+    file: csvBlob(source.header, [source.lines[index]]),
+    index,
+    threshold,
+  })
 }

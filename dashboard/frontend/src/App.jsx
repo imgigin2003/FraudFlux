@@ -87,7 +87,7 @@ export default function App() {
     setExplainError(null)
     setExplanation(null)
     try {
-      const ex = await explainRow(result.job_id, row.index)
+      const ex = await explainRow(result.source, row.index, result.threshold)
       setExplanation(ex)
     } catch (e) {
       setExplainError(e.message)
@@ -195,7 +195,7 @@ export default function App() {
         <footer className="fx-foot">
           Held-out test split ({model.test_transactions.toLocaleString()} transactions): recall {(model.recall * 100).toFixed(2)}%,
           precision {(model.precision * 100).toFixed(2)}%, F1 {(model.f1 * 100).toFixed(2)}%. Confusion matrix TN {model.confusion_matrix.tn.toLocaleString()} / FP {model.confusion_matrix.fp} / FN {model.confusion_matrix.fn} / TP {model.confusion_matrix.tp}.
-          {model.explanations_available === false && ' Explanations are disabled: install shap on the API.'}
+          {model.explanations_available === false && ' Explanations are unavailable: the API could not load the model.'}
         </footer>
       )}
     </div>

@@ -1,32 +1,33 @@
 """FraudFlux scoring API.
 
 Wraps the deployed Random Forest (models/random_forest.pkl) and the StandardScaler
-fitted in src/prepare_data.py. Mirrors predict.py, but returns JSON instead of
-printing, and enforces the exact column set so the known column-order limitation
-documented in the README cannot fail silently.
+fitted in src/prepare_data.py, exported to models/random_forest_trees.npz by
+export_model.py. Mirrors predict.py, but returns JSON instead of printing, and
+enforces the exact column set so the known column-order limitation documented
+in the README cannot fail silently.
 
-Also exposes per-transaction explanations (SHAP TreeExplainer) so the dashboard
-can show which features pushed a row toward or away from fraud.
+Also exposes per-transaction explanations (exact TreeSHAP) so the dashboard can
+show which features pushed a row toward or away from fraud. The API keeps no
+state between requests, so it can run as a serverless function.
 """
 
 import io
 import os
-import uuid
-from collections import OrderedDict
+from pathlib import Path
 from typing import List, Optional
 
-import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-MODEL_PATH = os.getenv("FRAUDFLUX_MODEL_PATH", "./models/random_forest.pkl")
-SCALER_PATH = os.getenv("FRAUDFLUX_SCALER_PATH", "./data/processed/scaler.pkl")
+from .forest import Forest
+
+ROOT = Path(__file__).resolve().parents[2]
+MODEL_PATH = os.getenv("FRAUDFLUX_MODEL_PATH", str(ROOT / "models/random_forest_trees.npz"))
 DEFAULT_THRESHOLD = float(os.getenv("FRAUDFLUX_THRESHOLD", "0.15"))
 CORS_ORIGINS = os.getenv("FRAUDFLUX_CORS_ORIGINS", "http://localhost:5173").split(",")
 MAX_ROWS = int(os.getenv("FRAUDFLUX_MAX_ROWS", "200000"))
-MAX_CACHED_JOBS = int(os.getenv("FRAUDFLUX_MAX_CACHED_JOBS", "5"))
 
 # Exact training column order from the source dataset (Class dropped).
 FEATURE_COLUMNS: List[str] = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
@@ -42,7 +43,7 @@ REPORTED_METRICS = {
     "confusion_matrix": {"tn": 56632, "fp": 19, "fn": 18, "tp": 77},
 }
 
-app = FastAPI(title="FraudFlux API", version="1.1.0")
+app = FastAPI(title="FraudFlux API", version="1.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -50,43 +51,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_model = None
-_scaler = None
-_explainer = None
+# Loaded at import rather than on startup: serverless runtimes may skip lifespan events.
+_forest: Optional[Forest] = None
 _load_error: Optional[str] = None
-_explainer_error: Optional[str] = None
-
-# Most recent scored uploads, so /api/explain can look a row up by job id.
-# Each value: {"raw": DataFrame, "scaled": ndarray, "probs": ndarray, "threshold": float}
-_jobs: "OrderedDict[str, dict]" = OrderedDict()
-
-
-@app.on_event("startup")
-def load_artifacts() -> None:
-    global _model, _scaler, _explainer, _load_error, _explainer_error
-    try:
-        _model = joblib.load(MODEL_PATH)
-        _scaler = joblib.load(SCALER_PATH)
-        _load_error = None
-    except Exception as exc:  # noqa: BLE001
-        _load_error = f"{type(exc).__name__}: {exc}"
-        return
-
-    try:
-        import shap  # imported lazily so the API still scores without it
-
-        _explainer = shap.TreeExplainer(_model)
-        _explainer_error = None
-    except Exception as exc:  # noqa: BLE001
-        _explainer = None
-        _explainer_error = f"{type(exc).__name__}: {exc}"
+try:
+    _forest = Forest(MODEL_PATH)
+except Exception as exc:  # noqa: BLE001
+    _load_error = f"{type(exc).__name__}: {exc}"
 
 
 def _require_artifacts():
-    if _model is None or _scaler is None:
+    if _forest is None:
         raise HTTPException(
             status_code=503,
-            detail=f"Model or scaler not loaded. {_load_error or ''}".strip(),
+            detail=f"Model not loaded. {_load_error or ''}".strip(),
         )
 
 
@@ -110,87 +88,18 @@ def _validate_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _scale(df: pd.DataFrame) -> np.ndarray:
     scaled = df.copy()
-    scaled[COLUMNS_TO_SCALE] = _scaler.transform(df[COLUMNS_TO_SCALE])
-    # The model was fitted on a numpy array, so score a numpy array too.
-    # This avoids the feature-name warning noted in the README.
+    scaled[COLUMNS_TO_SCALE] = _forest.scale(df[COLUMNS_TO_SCALE].to_numpy())
     return scaled.to_numpy()
 
 
-def _remember_job(job: dict) -> str:
-    job_id = uuid.uuid4().hex
-    _jobs[job_id] = job
-    while len(_jobs) > MAX_CACHED_JOBS:
-        _jobs.popitem(last=False)
-    return job_id
-
-
-def _fraud_class_index() -> int:
-    classes = list(getattr(_model, "classes_", [0, 1]))
-    return classes.index(1) if 1 in classes else len(classes) - 1
-
-
-def _shap_for_row(x_row: np.ndarray):
-    """Return (contributions[30], baseline) for the fraud class.
-
-    Handles both shap output layouts: a list of per-class arrays (older shap)
-    and a single array shaped (n_samples, n_features, n_classes) (newer shap).
-    """
-    k = _fraud_class_index()
-    values = _explainer.shap_values(x_row.reshape(1, -1))
-    expected = _explainer.expected_value
-
-    if isinstance(values, list):
-        contrib = np.asarray(values[k])[0]
-        base = float(np.asarray(expected)[k]) if np.ndim(expected) else float(expected)
-    else:
-        arr = np.asarray(values)
-        if arr.ndim == 3:
-            contrib = arr[0, :, k]
-            base = float(np.asarray(expected)[k])
-        else:
-            contrib = arr[0]
-            base = float(np.asarray(expected).ravel()[0])
-    return contrib.astype(float), base
-
-
-@app.get("/api/health")
-def health():
-    return {
-        "status": "ok" if _load_error is None else "degraded",
-        "model_loaded": _model is not None,
-        "scaler_loaded": _scaler is not None,
-        "explainer_loaded": _explainer is not None,
-        "error": _load_error,
-        "explainer_error": _explainer_error,
-    }
-
-
-@app.get("/api/model")
-def model_info():
-    info = {
-        "threshold": DEFAULT_THRESHOLD,
-        "expected_columns": FEATURE_COLUMNS,
-        "scaled_columns": COLUMNS_TO_SCALE,
-        "explanations_available": _explainer is not None,
-        **REPORTED_METRICS,
-    }
-    if _model is not None:
-        info["estimator"] = type(_model).__name__
-        info["n_estimators"] = getattr(_model, "n_estimators", None)
-    return info
-
-
-@app.post("/api/predict")
-async def predict(
-    file: UploadFile = File(...),
-    threshold: Optional[float] = Form(None),
-):
-    _require_artifacts()
-
+def _parse_threshold(threshold: Optional[float]) -> float:
     thr = DEFAULT_THRESHOLD if threshold is None else float(threshold)
     if not 0.0 <= thr <= 1.0:
         raise HTTPException(status_code=422, detail="threshold must be between 0 and 1")
+    return thr
 
+
+async def _read_transactions(file: UploadFile) -> pd.DataFrame:
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=422, detail="Uploaded file is empty.")
@@ -216,17 +125,46 @@ async def predict(
         )
 
     try:
-        df = df.astype(float).reset_index(drop=True)
+        return df.astype(float).reset_index(drop=True)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"Non-numeric value in CSV: {exc}")
 
-    x_scaled = _scale(df)
-    probs = _model.predict_proba(x_scaled)[:, _fraud_class_index()]
-    preds = (probs >= thr).astype(int)
 
-    job_id = _remember_job(
-        {"raw": df, "scaled": x_scaled, "probs": probs, "threshold": thr}
-    )
+@app.get("/api/health")
+def health():
+    return {
+        "status": "ok" if _load_error is None else "degraded",
+        "model_loaded": _forest is not None,
+        "error": _load_error,
+    }
+
+
+@app.get("/api/model")
+def model_info():
+    info = {
+        "threshold": DEFAULT_THRESHOLD,
+        "expected_columns": FEATURE_COLUMNS,
+        "scaled_columns": COLUMNS_TO_SCALE,
+        "explanations_available": _forest is not None,
+        **REPORTED_METRICS,
+    }
+    if _forest is not None:
+        info["estimator"] = "RandomForestClassifier"
+        info["n_estimators"] = _forest.n_trees
+    return info
+
+
+@app.post("/api/predict")
+async def predict(
+    file: UploadFile = File(...),
+    threshold: Optional[float] = Form(None),
+):
+    _require_artifacts()
+    thr = _parse_threshold(threshold)
+    df = await _read_transactions(file)
+
+    probs = _forest.predict_proba(_scale(df))
+    preds = (probs >= thr).astype(int)
 
     rows = [
         {
@@ -241,10 +179,9 @@ async def predict(
 
     n_fraud = int(preds.sum())
     return {
-        "job_id": job_id,
         "filename": file.filename,
         "threshold": thr,
-        "explanations_available": _explainer is not None,
+        "explanations_available": True,
         "summary": {
             "total": len(df),
             "fraud": n_fraud,
@@ -258,32 +195,28 @@ async def predict(
     }
 
 
-@app.get("/api/explain/{job_id}/{index}")
-def explain(job_id: str, index: int):
+@app.post("/api/explain")
+async def explain(
+    file: UploadFile = File(...),
+    index: int = Form(...),
+    threshold: Optional[float] = Form(None),
+):
+    """Explain one transaction, sent back by the client as a one-row CSV."""
     _require_artifacts()
-    if _explainer is None:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Explanations unavailable. Install `shap`. {_explainer_error or ''}".strip(),
-        )
+    thr = _parse_threshold(threshold)
+    df = await _read_transactions(file)
+    if len(df) != 1:
+        raise HTTPException(status_code=422, detail="Send exactly one transaction to explain.")
 
-    job = _jobs.get(job_id)
-    if job is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Scored file no longer cached. Upload it again to explain rows.",
-        )
-    if not 0 <= index < len(job["raw"]):
-        raise HTTPException(status_code=404, detail="Transaction index out of range.")
-
+    x_scaled = _scale(df)
     try:
-        contrib, baseline = _shap_for_row(job["scaled"][index])
+        contrib = _forest.shap_values(x_scaled[0])
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Explanation failed: {exc}")
+    baseline = _forest.expected_value
 
-    raw_row = job["raw"].iloc[index]
-    prob = float(job["probs"][index])
-    thr = float(job["threshold"])
+    raw_row = df.iloc[0]
+    prob = float(_forest.predict_proba(x_scaled)[0])
 
     features = [
         {

@@ -13,3 +13,6 @@ dataset/creditcard.csv
 # Processed features — large binary, regenerate via preprocessing.py
 data/processed/*.npy
 .DS_Store
+
+# Vercel CLI
+.vercel

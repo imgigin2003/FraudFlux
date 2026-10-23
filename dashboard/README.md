@@ -7,8 +7,10 @@ reached that verdict (per-transaction SHAP feature contributions).
 
 ```
 dashboard/
-├── backend/          # FastAPI, wraps models/random_forest.pkl + data/processed/scaler.pkl
+├── backend/          # FastAPI, serves models/random_forest_trees.npz
 │   ├── main.py
+│   ├── forest.py         # numpy Random Forest scoring + exact TreeSHAP
+│   ├── export_model.py   # .pkl model + scaler -> .npz
 │   └── requirements.txt
 └── frontend/         # React + Vite, styled after FraudFluxPreview
     ├── index.html
@@ -30,23 +32,37 @@ Optional environment variables:
 
 | Variable | Default |
 | --- | --- |
-| `FRAUDFLUX_MODEL_PATH` | `./models/random_forest.pkl` |
-| `FRAUDFLUX_SCALER_PATH` | `./data/processed/scaler.pkl` |
+| `FRAUDFLUX_MODEL_PATH` | `models/random_forest_trees.npz` |
 | `FRAUDFLUX_THRESHOLD` | `0.15` |
 | `FRAUDFLUX_CORS_ORIGINS` | `http://localhost:5173` |
 | `FRAUDFLUX_MAX_ROWS` | `200000` |
-| `FRAUDFLUX_MAX_CACHED_JOBS` | `5` (scored uploads kept in memory for explanations) |
 
 Endpoints:
 
-- `GET /api/health` -> model, scaler, and explainer load status
+- `GET /api/health` -> model load status
 - `GET /api/model` -> model name, threshold, expected columns, reported test metrics
-- `POST /api/predict` (multipart `file`, optional `threshold` form field) -> `job_id`, per-row probability and verdict, summary
-- `GET /api/explain/{job_id}/{index}` -> SHAP contributions for one scored row: baseline probability, signed contribution and raw value per feature, plain-language summary
+- `POST /api/predict` (multipart `file`, optional `threshold` form field) -> per-row probability and verdict, summary
+- `POST /api/explain` (multipart `file` holding one CSV row, `index`, optional `threshold`) -> SHAP contributions for that row: baseline probability, signed contribution and raw value per feature, plain-language summary
 
-Explanations use `shap.TreeExplainer` on the loaded Random Forest. If `shap` is not
-installed the API still scores; the explain endpoint returns 503 and the UI shows
-an error with a retry button.
+The API keeps no state between requests. The UI sends a row back to `/api/explain`
+when it is clicked, and uploads large CSVs to `/api/predict` in chunks of about
+3 MB to stay under serverless request limits.
+
+The model runs without scikit-learn or shap: `forest.py` reimplements
+`predict_proba` and path-dependent TreeSHAP in numpy on the arrays in
+`models/random_forest_trees.npz`, which matches both libraries to floating-point
+precision. After retraining, regenerate the file (needs scikit-learn and joblib):
+
+```bash
+python -m dashboard.backend.export_model
+```
+
+## Deploy to Vercel
+
+The repo root is a Vercel project: `vercel.json` builds the frontend from
+`dashboard/frontend` and serves the API from `api/index.py` (dependencies from
+the root `requirements.txt`). Import the repo in Vercel with the root directory
+left as the repo root and deploy; no settings or environment variables needed.
 
 ## Run the frontend
 

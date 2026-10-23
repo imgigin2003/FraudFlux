@@ -1,0 +1,3 @@
+# Runtime dependencies for the Vercel API function (api/index.py).
+# Training dependencies live in src/requirements.txt.
+-r dashboard/backend/requirements.txt

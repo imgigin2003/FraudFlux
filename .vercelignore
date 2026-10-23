@@ -1,0 +1,8 @@
+dataset/
+data/
+src/
+predict.py
+models/*.pkl
+deploy/
+**/__pycache__/
+venv/
